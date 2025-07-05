@@ -33,6 +33,7 @@
     const videoFeed = document.getElementById('video-feed');
     let safetyRois = {{ config.safety_rois | default([]) | tojson | safe }};
     let drawing = false;
+    let removing = false;
     let currentPoints = [];
 
     function resizeCanvas() {
@@ -47,8 +48,22 @@
     };
     window.addEventListener('resize', resizeCanvas);
 
+    function pointInPolygon(point, polygon) {
+      const x = point[0], y = point[1];
+      let inside = false;
+      for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i][0], yi = polygon[i][1];
+        const xj = polygon[j][0], yj = polygon[j][1];
+        const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    }
+
     function drawROIs() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw saved ROIs (solid lines)
       safetyRois.forEach(roi => {
         const points = roi.coords;
         ctx.beginPath();
@@ -57,6 +72,7 @@
           ctx.lineTo(points[i][0], points[i][1]);
         }
         ctx.closePath();
+        ctx.setLineDash([]); // Solid line for saved ROIs
         ctx.strokeStyle = 'red';
         ctx.lineWidth = 2;
         ctx.stroke();
@@ -64,25 +80,53 @@
         ctx.font = '14px Arial';
         ctx.fillText(roi.name, points[0][0] + 5, points[0][1] + 15);
       });
+
+      // Draw current polygon being created
       if (drawing && currentPoints.length > 0) {
-        ctx.beginPath();
-        ctx.moveTo(currentPoints[0][0], currentPoints[0][1]);
-        for (let i = 1; i < currentPoints.length; i++) {
-          ctx.lineTo(currentPoints[i][0], currentPoints[i][1]);
-        }
         ctx.strokeStyle = 'red';
         ctx.lineWidth = 2;
-        ctx.stroke();
+        if (currentPoints.length === 1) {
+          // Draw a dot for the first point
+          ctx.beginPath();
+          ctx.arc(currentPoints[0][0], currentPoints[0][1], 3, 0, 2 * Math.PI);
+          ctx.setLineDash([5, 5]); // Dashed style for visual indication
+          ctx.fillStyle = 'red';
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          // Draw lines for two or more points
+          ctx.beginPath();
+          ctx.moveTo(currentPoints[0][0], currentPoints[0][1]);
+          for (let i = 1; i < currentPoints.length; i++) {
+            ctx.lineTo(currentPoints[i][0], currentPoints[i][1]);
+          }
+          ctx.setLineDash([]); // Solid line for 2+ points
+          ctx.stroke();
+        }
       }
+      ctx.setLineDash([]); // Reset to solid for next draw
     }
 
     canvas.addEventListener('click', (e) => {
-      if (!drawing) return;
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
-      currentPoints.push([x, y]);
-      drawROIs();
+
+      if (drawing) {
+        currentPoints.push([x, y]);
+        drawROIs();
+      } else if (removing) {
+        // Check if click is inside any ROI
+        for (let i = safetyRois.length - 1; i >= 0; i--) {
+          const roi = safetyRois[i];
+          if (pointInPolygon([x, y], roi.coords)) {
+            safetyRois.splice(i, 1); // Remove the ROI
+            drawROIs();
+            break;
+          }
+        }
+        removing = false; // Exit remove mode after one click
+      }
     });
 
     canvas.addEventListener('dblclick', (e) => {
@@ -100,14 +144,15 @@
 
     document.getElementById('add-roi').addEventListener('click', () => {
       drawing = true;
+      removing = false;
       currentPoints = [];
       drawROIs();
     });
 
     document.getElementById('remove-roi').addEventListener('click', () => {
-      safetyRois.pop();
-      currentPoints = [];
       drawing = false;
+      removing = true;
+      currentPoints = [];
       drawROIs();
     });
 
@@ -115,6 +160,7 @@
       safetyRois = [];
       currentPoints = [];
       drawing = false;
+      removing = false;
       drawROIs();
     });
 

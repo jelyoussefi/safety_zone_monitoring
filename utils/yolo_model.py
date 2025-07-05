@@ -33,8 +33,7 @@ labels = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 
 class YoloModelBase:
     """Base class for all YOLO models with common functionality"""
     
-    def __init__(self, callback_function=None):
-        self.user_callback = callback_function
+    def __init__(self):
         self.labels = labels
         self.num_masks = 32  # Default for YOLOv8
         self.conf_threshold = 0.5
@@ -42,15 +41,9 @@ class YoloModelBase:
         self.input_width = None  # Will be set by derived classes or during inference
         self.input_height = None  # Will be set by derived classes or during inference
 
-    def callback(self, boxes, image):
-        image = self.postprocess(boxes, image)
-        if self.user_callback is not None:
-            self.user_callback(image)
-
     def postprocess(self, pred_boxes, image):
         boxes, scores, class_ids = self.process_box_output(pred_boxes, image)
-        image = self.draw_detections(image, boxes, scores, class_ids)
-        return image
+        return image, boxes, scores, class_ids
 
     def get_boxes(self, box_predictions, orig_img):
         img_height = orig_img.shape[0]
@@ -178,28 +171,27 @@ class YoloModelBase:
 class YoloV8ModelBase(YoloModelBase):
     """YOLOv8 specific implementation"""
     
-    def __init__(self, callback_function=None):
-        super().__init__(callback_function)
-        # YOLOv8 specific settings
+    def __init__(self):
+        super().__init__()
         self.num_masks = 32
 
 
 class YoloV11ModelBase(YoloModelBase):
     """YOLOv11 specific implementation"""
     
-    def __init__(self, callback_function=None):
-        super().__init__(callback_function)
+    def __init__(self):
+        super().__init__()
         # YOLOv11 specific settings
         self.num_masks = 32  # Adjust if YOLOv11 uses a different number
 
 
 class YoloV8Model(YoloV8ModelBase, Model):
-    def __init__(self, model_path, device, callback_function):
-        YoloV8ModelBase.__init__(self, callback_function)
-        Model.__init__(self, model_path, device,  255.0, callback_function is not None)
+    def __init__(self, model_path, device):
+        YoloV8ModelBase.__init__(self)
+        Model.__init__(self, model_path, device,  255.0)
 
 
 class YoloV11Model(YoloV11ModelBase, Model):
-    def __init__(self, model_path, device, callback_function):
-        YoloV11ModelBase.__init__(self, callback_function)
-        Model.__init__(self, model_path, device, 255.0, callback_function is not None)
+    def __init__(self, model_path, device):
+        YoloV11ModelBase.__init__(self)
+        Model.__init__(self, model_path, device, 255.0)

@@ -41,7 +41,7 @@ build:
 	
 	
 app: build
-	@$(call msg, Running the yolov8 demo ...)
+	@$(call msg, Running the Safety Zone Monitoring ...)
 	@docker run ${DOCKER_RUN_PARAMS} bash -c ' \
 		python3 ./app.py  \
 				--detection_model /opt/models/yolo11n/FP16/yolo11n.xml \
