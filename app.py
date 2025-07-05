@@ -30,6 +30,8 @@ class SafetyZoneMonitor:
         self.cv = Condition()
         self.current_safety_rois = self.config.get('safety_rois', [])
         self.frame = None
+        self.high_violation = False
+        self.low_violation = False
 
     def run(self):
         app = self.app
@@ -48,6 +50,14 @@ class SafetyZoneMonitor:
             # Check if we're in config mode (marker.html) by looking at the referer
             config_mode = request.headers.get('Referer', '').endswith('/config')
             return Response(self.video_stream(config_mode), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+        @app.route('/zone_status')
+        def zone_status():
+            """Return current zone violation status for audio alerts"""
+            return jsonify({
+                'high_violation': getattr(self, 'high_violation', False),
+                'low_violation': getattr(self, 'low_violation', False)
+            })
 
         @app.route('/save', methods=['POST'])
         def save():
@@ -206,26 +216,50 @@ class SafetyZoneMonitor:
                     if not config_mode:
                         for roi in self.current_safety_rois:
                             points = np.array(roi['coords'], np.int32).reshape(-1, 1, 2)
-                            cv2.polylines(frame, [points], True, (0, 0, 255), 2)
-                            cv2.putText(frame, roi['name'], (int(roi['coords'][0][0]) + 5, int(roi['coords'][0][1]) + 15), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                            # Use different colors based on zone type
+                            zone_type = roi.get('type', 'high')  # Default to 'high'
+                            if zone_type == 'high':
+                                roi_color = (0, 0, 255)  # Red for high security
+                            else:  # 'low'
+                                roi_color = (0, 165, 255)  # Orange for low security
+                            
+                            cv2.polylines(frame, [points], True, roi_color, 2)
 
                     frame, boxes, scores, class_ids = self.model.predict(frame)
+                    
+                    # Reset violation flags
+                    self.high_violation = False
+                    self.low_violation = False
                     
                     for box, score, class_id in zip(boxes, scores, class_ids):
                         label = self.model.labels[class_id]
                         if label == 'person':
-                            # Check if person bbox intersects with any ROI
-                            intersects_roi = False
+                            # First check high security zones
+                            in_high_security = False
                             for roi in self.current_safety_rois:
-                                if self.bbox_intersects_roi(box, roi['coords']):
-                                    intersects_roi = True
+                                if roi.get('type', 'high') == 'high' and self.bbox_intersects_roi(box, roi['coords']):
+                                    in_high_security = True
+                                    self.high_violation = True
                                     break
                             
-                            # Set color based on ROI intersection
-                            color = (0, 0, 255) if intersects_roi else (0, 255, 0)  # Red if intersects ROI, Green if not
+                            # Only check low security zones if not in high security
+                            in_low_security = False
+                            if not in_high_security:
+                                for roi in self.current_safety_rois:
+                                    if roi.get('type', 'high') == 'low' and self.bbox_intersects_roi(box, roi['coords']):
+                                        in_low_security = True
+                                        self.low_violation = True
+                                        break
+                            
+                            # Set color based on zone type
+                            if in_high_security:
+                                color = (0, 0, 255)  # Red for high security violation
+                            elif in_low_security:
+                                color = (0, 165, 255)  # Orange for low security violation
+                            else:
+                                color = (0, 255, 0)  # Green if not in any zone
+                            
                             x1, y1, x2, y2 = box.astype(int)
-
                             frame = self.model.plot_one_box(frame, x1, y1, x2, y2, score, label, color)
 
                     ret, buffer = cv2.imencode('.jpg', frame)

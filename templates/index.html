@@ -13,6 +13,7 @@
     <h1>Safety Zone Monitor</h1>
     <div class="button-panel">
       <a href="{{ url_for('config') }}" class="btn btn-primary">Configure ROIs</a>
+      <button id="toggle-audio" class="btn btn-success">Disable Audio Alerts</button>
     </div>
     <div>
       <img id="video-feed" src="{{ url_for('video_feed') }}" alt="Video Feed">
@@ -24,6 +25,132 @@
   {{ super() }}
   <script>
     const videoFeed = document.getElementById('video-feed');
+    const toggleAudioBtn = document.getElementById('toggle-audio');
+    let audioEnabled = true; // Default to enabled
+    let audioContext = null;
+    let lastHighViolation = false;
+    let lastLowViolation = false;
+    let highAlarmPlaying = false;
+    let lowAlarmPlaying = false;
+
+    // Initialize audio context on first user interaction
+    function initAudioContext() {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      return audioContext;
+    }
+
+    // Generate warning tone
+    function playWarningTone(frequency, duration, type) {
+      if (!audioEnabled || !audioContext) return;
+
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+      oscillator.type = 'sine';
+      
+      gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+      gainNode.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + 0.01);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + duration);
+      
+      return oscillator;
+    }
+
+    // Play high security alarm (rapid beeps)
+    function playHighSecurityAlarm() {
+      if (highAlarmPlaying) return;
+      highAlarmPlaying = true;
+      
+      let beepCount = 0;
+      const beepInterval = setInterval(() => {
+        playWarningTone(1000, 0.2, 'high'); // 1000Hz tone for 200ms
+        beepCount++;
+        
+        if (beepCount >= 5 || !lastHighViolation) {
+          clearInterval(beepInterval);
+          highAlarmPlaying = false;
+        }
+      }, 300); // Beep every 300ms
+    }
+
+    // Play low security alarm (slower beeps)
+    function playLowSecurityAlarm() {
+      if (lowAlarmPlaying) return;
+      lowAlarmPlaying = true;
+      
+      let beepCount = 0;
+      const beepInterval = setInterval(() => {
+        playWarningTone(600, 0.4, 'low'); // 600Hz tone for 400ms
+        beepCount++;
+        
+        if (beepCount >= 3 || !lastLowViolation) {
+          clearInterval(beepInterval);
+          lowAlarmPlaying = false;
+        }
+      }, 800); // Beep every 800ms
+    }
+
+    // Check zone status
+    function checkZoneStatus() {
+      if (!audioEnabled) return;
+      
+      fetch('/zone_status')
+        .then(response => response.json())
+        .then(data => {
+          const currentHighViolation = data.high_violation;
+          const currentLowViolation = data.low_violation;
+          
+          // Trigger high security alarm on new violation
+          if (currentHighViolation && !lastHighViolation) {
+            playHighSecurityAlarm();
+          }
+          
+          // Trigger low security alarm on new violation (only if no high violation)
+          if (currentLowViolation && !lastLowViolation && !currentHighViolation) {
+            playLowSecurityAlarm();
+          }
+          
+          lastHighViolation = currentHighViolation;
+          lastLowViolation = currentLowViolation;
+        })
+        .catch(error => {
+          console.error('Error checking zone status:', error);
+        });
+    }
+
+    // Toggle audio alerts
+    toggleAudioBtn.addEventListener('click', () => {
+      if (audioEnabled) {
+        audioEnabled = false;
+        toggleAudioBtn.textContent = 'Enable Audio Alerts';
+        toggleAudioBtn.classList.remove('btn-success');
+        toggleAudioBtn.classList.add('btn-secondary');
+      } else {
+        initAudioContext();
+        audioEnabled = true;
+        toggleAudioBtn.textContent = 'Disable Audio Alerts';
+        toggleAudioBtn.classList.remove('btn-secondary');
+        toggleAudioBtn.classList.add('btn-success');
+      }
+    });
+
+    // Initialize audio on page load and start monitoring
+    document.addEventListener('click', function initAudio() {
+      initAudioContext();
+      document.removeEventListener('click', initAudio);
+    }, { once: true });
+
+    // Start checking zone status every 500ms immediately
+    setInterval(checkZoneStatus, 500);
+
     videoFeed.onerror = function() {
       videoFeed.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
     };
