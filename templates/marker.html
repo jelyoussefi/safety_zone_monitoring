@@ -1,0 +1,143 @@
+{% extends "bootstrap/base.html" %}
+{% import "bootstrap/wtf.html" as wtf %}
+
+{% block title %}Safety Zone Monitor{% endblock %}
+
+{% block head %}
+  {{ super() }}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{% endblock %}
+
+{% block content %}
+  <div class="container">
+    <h1>Safety Zone Monitor</h1>
+    <div class="button-panel">
+      <button id="add-roi" class="btn btn-success">Add ROI</button>
+      <button id="remove-roi" class="btn btn-danger">Remove</button>
+      <button id="reset-rois" class="btn btn-warning">Reset</button>
+      <button id="save-rois" class="btn btn-primary">Save</button>
+      <a href="{{ url_for('home') }}" class="btn btn-info">Home</a>
+    </div>
+    <div id="video-container">
+      <img id="video-feed" src="{{ url_for('video_feed') }}" alt="Video Feed">
+      <canvas id="roi-canvas" width="1280" height="720"></canvas>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  {{ super() }}
+  <script>
+    const canvas = document.getElementById('roi-canvas');
+    const ctx = canvas.getContext('2d');
+    const videoFeed = document.getElementById('video-feed');
+    let safetyRois = {{ config.safety_rois | default([]) | tojson | safe }};
+    let drawing = false;
+    let currentPoints = [];
+
+    function resizeCanvas() {
+      canvas.width = 1280;
+      canvas.height = 720;
+      drawROIs();
+    }
+
+    videoFeed.onload = resizeCanvas;
+    videoFeed.onerror = function() {
+      videoFeed.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
+    };
+    window.addEventListener('resize', resizeCanvas);
+
+    function drawROIs() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      safetyRois.forEach(roi => {
+        const points = roi.coords;
+        ctx.beginPath();
+        ctx.moveTo(points[0][0], points[0][1]);
+        for (let i = 1; i < points.length; i++) {
+          ctx.lineTo(points[i][0], points[i][1]);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = 'red';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = 'white';
+        ctx.font = '14px Arial';
+        ctx.fillText(roi.name, points[0][0] + 5, points[0][1] + 15);
+      });
+      if (drawing && currentPoints.length > 0) {
+        ctx.beginPath();
+        ctx.moveTo(currentPoints[0][0], currentPoints[0][1]);
+        for (let i = 1; i < currentPoints.length; i++) {
+          ctx.lineTo(currentPoints[i][0], currentPoints[i][1]);
+        }
+        ctx.strokeStyle = 'red';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    canvas.addEventListener('click', (e) => {
+      if (!drawing) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      currentPoints.push([x, y]);
+      drawROIs();
+    });
+
+    canvas.addEventListener('dblclick', (e) => {
+      if (drawing && currentPoints.length >= 3) {
+        safetyRois.push({
+          id: safetyRois.length + 1,
+          name: `ROI ${safetyRois.length + 1}`,
+          coords: currentPoints
+        });
+        currentPoints = [];
+        drawing = false;
+        drawROIs();
+      }
+    });
+
+    document.getElementById('add-roi').addEventListener('click', () => {
+      drawing = true;
+      currentPoints = [];
+      drawROIs();
+    });
+
+    document.getElementById('remove-roi').addEventListener('click', () => {
+      safetyRois.pop();
+      currentPoints = [];
+      drawing = false;
+      drawROIs();
+    });
+
+    document.getElementById('reset-rois').addEventListener('click', () => {
+      safetyRois = [];
+      currentPoints = [];
+      drawing = false;
+      drawROIs();
+    });
+
+    document.getElementById('save-rois').addEventListener('click', () => {
+      fetch('/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ safety_rois: safetyRois })
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.success) {
+          alert('ROIs saved successfully!');
+        } else {
+          alert('Failed to save ROIs.');
+        }
+      })
+      .catch(error => {
+        console.error('Error saving ROIs:', error);
+        alert('Error saving ROIs.');
+      });
+    });
+
+    drawROIs();
+  </script>
+{% endblock %}

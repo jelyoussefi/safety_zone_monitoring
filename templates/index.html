@@ -1,0 +1,31 @@
+{% extends "bootstrap/base.html" %}
+{% import "bootstrap/wtf.html" as wtf %}
+
+{% block title %}Safety Zone Monitor{% endblock %}
+
+{% block head %}
+  {{ super() }}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{% endblock %}
+
+{% block content %}
+  <div class="container">
+    <h1>Safety Zone Monitor</h1>
+    <div class="button-panel">
+      <a href="{{ url_for('config') }}" class="btn btn-primary">Configure ROIs</a>
+    </div>
+    <div>
+      <img id="video-feed" src="{{ url_for('video_feed') }}" alt="Video Feed">
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  {{ super() }}
+  <script>
+    const videoFeed = document.getElementById('video-feed');
+    videoFeed.onerror = function() {
+      videoFeed.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
+    };
+  </script>
+{% endblock %}
