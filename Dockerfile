@@ -112,6 +112,6 @@ COPY ./utils/models.sh /tmp/
 WORKDIR /opt/models
 RUN bash /tmp/models.sh
 
-RUN pip3 install --break-system-packages flask_restful
+RUN pip3 install --break-system-packages shapely flask_restful
 # Set working directory for the application
 WORKDIR /workspace
