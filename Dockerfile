@@ -27,7 +27,6 @@ RUN apt-get update -y && apt-get install -y \
     python3-pip \
     python3-dev \
     python3-setuptools \
-    python3-opencv \
     libopencv-dev \
     ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -51,6 +50,7 @@ RUN add-apt-repository -y ppa:kobuk-team/intel-graphics && \
     va-driver-all \
     vainfo \
     libze-dev \
+    libzbar0 \
     intel-ocloc \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -89,29 +89,21 @@ RUN apt-get remove -y python3-blinker || true && \
     zeroconf \
     psutil \
     pafy \
-    flask \
+    opencv-python \
     psycopg2 \
     screeninfo \
     flask_bootstrap \
+    flask \
+    flask_restful \
+    shapely \
     nncf \
-    ultralytics
+    ultralytics \
+    pyzbar
 
 # Install OpenVINO and OpenVINO-dev with ONNX support
 RUN pip3 install --break-system-packages --pre -U \
     openvino openvino-dev[onnx] \
     --extra-index-url https://storage.openvinotoolkit.org/simple/wheels/nightly
 
-#=======================================
-# Models Preparation
-#=======================================
-# Add PATH for Intel user binaries
-ENV PATH=/home/intel/.local/bin:${PATH}
-
-# Copy and run models setup script
-COPY ./utils/models.sh /tmp/
-WORKDIR /opt/models
-RUN bash /tmp/models.sh
-
-RUN pip3 install --break-system-packages shapely flask_restful
 # Set working directory for the application
 WORKDIR /workspace

@@ -40,6 +40,14 @@
       </label>
     </div>
     
+    <div style="margin: 10px 0; padding: 10px; background-color: #e7f3ff; border: 1px solid #b3d9ff; border-radius: 5px;">
+      <strong>Instructions:</strong>
+      <ul style="text-align: left; margin: 5px 0;">
+        <li><strong>2-Point Vertical Zone:</strong> Click 2 points, then <strong>right-click</strong> to create a full-height vertical zone</li>
+        <li><strong>4-Point Custom Zone:</strong> Click 4 points (zone is created automatically after the 4th click)</li>
+      </ul>
+    </div>
+    
     <div class="button-panel">
       <button id="add-roi" class="btn btn-success">Add ROI</button>
       <button id="remove-roi" class="btn btn-danger">Remove</button>
@@ -48,7 +56,7 @@
     </div>
     <div id="video-container">
       <img id="video-feed" src="{{ url_for('video_feed') }}" alt="Video Feed">
-      <canvas id="roi-canvas" width="1280" height="720"></canvas>
+      <canvas id="roi-canvas"></canvas>
     </div>
   </div>
 {% endblock %}
@@ -106,8 +114,14 @@
     }
 
     function resizeCanvas() {
-      canvas.width = 1280;
-      canvas.height = 720;
+      // Set canvas internal size to natural video dimensions for consistent coordinates
+      canvas.width = videoFeed.naturalWidth || 1280;
+      canvas.height = videoFeed.naturalHeight || 720;
+      
+      // Scale canvas display size to match the actual displayed video size
+      canvas.style.width = videoFeed.clientWidth + 'px';
+      canvas.style.height = videoFeed.clientHeight + 'px';
+      
       drawROIs();
     }
 
@@ -116,6 +130,11 @@
       videoFeed.src = "{{ url_for('video_feed') }}?" + new Date().getTime();
     };
     window.addEventListener('resize', resizeCanvas);
+    
+    // Initial canvas setup
+    if (videoFeed.complete) {
+      resizeCanvas();
+    }
 
     function pointInPolygon(point, polygon) {
       const x = point[0], y = point[1];
@@ -131,10 +150,11 @@
 
     function drawROIs() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-
       // Draw saved ROIs with different colors based on type
       safetyRois.forEach(roi => {
         const points = roi.coords;
+        console.log("================================")
+        console.log(points)
         const zoneColor = getZoneColor(roi.type || 'high');
         
         ctx.beginPath();
@@ -203,11 +223,33 @@
 
     canvas.addEventListener('click', (e) => {
       const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = (e.clientX - rect.left) * scaleX;
+      const y = (e.clientY - rect.top) * scaleY;
 
       if (drawing) {
-        currentPoints.push([x, y]);
+        // Limit to 4 points maximum
+        if (currentPoints.length < 4) {
+          currentPoints.push([x, y]);
+          
+          // Auto-create zone after 4th point
+          if (currentPoints.length === 4) {
+            const selectedType = getSelectedZoneType();
+            
+            safetyRois.push({
+              id: safetyRois.length + 1,
+              name: `${selectedType.toUpperCase()} ROI ${safetyRois.length + 1}`,
+              coords: currentPoints,
+              type: selectedType
+            });
+            
+            currentPoints = [];
+            drawing = false;
+            drawROIs();
+            saveROIs();
+          }
+        }
         drawROIs();
       } else if (removing) {
         // Check if click is inside any ROI
@@ -224,31 +266,49 @@
       }
     });
 
+    // Right-click to complete 2-point vertical zone
+    canvas.addEventListener('contextmenu', (e) => {
+      e.preventDefault(); // Prevent context menu from appearing
+      
+      if (drawing && currentPoints.length === 2) {
+        const selectedType = getSelectedZoneType();
+        const p1 = currentPoints[0];
+        const p2 = currentPoints[1];
+        
+        // Create vertical rectangle from top to bottom of canvas
+        const leftX = Math.min(p1[0], p2[0]);
+        const rightX = Math.max(p1[0], p2[0]);
+        
+        const rectangleCoords = [
+          [leftX, 0],                // Top-left (y=0)
+          [rightX, 0],               // Top-right (y=0)
+          [rightX, canvas.height],   // Bottom-right (y=canvas.height)
+          [leftX, canvas.height]     // Bottom-left (y=canvas.height)
+        ];
+        
+        safetyRois.push({
+          id: safetyRois.length + 1,
+          name: `${selectedType.toUpperCase()} ROI ${safetyRois.length + 1}`,
+          coords: rectangleCoords,
+          type: selectedType
+        });
+        
+        currentPoints = [];
+        drawing = false;
+        drawROIs();
+        saveROIs();
+      }
+    });
+
     // Track mouse movement for dashed line preview
     canvas.addEventListener('mousemove', (e) => {
       if (drawing && currentPoints.length > 0) {
         const rect = canvas.getBoundingClientRect();
-        mousePos.x = e.clientX - rect.left;
-        mousePos.y = e.clientY - rect.top;
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        mousePos.x = (e.clientX - rect.left) * scaleX;
+        mousePos.y = (e.clientY - rect.top) * scaleY;
         drawROIs(); // Redraw to update the dashed line
-      }
-    });
-
-    canvas.addEventListener('dblclick', (e) => {
-      if (drawing && currentPoints.length >= 3) {
-        const selectedType = getSelectedZoneType();
-        safetyRois.push({
-          id: safetyRois.length + 1,
-          name: `${selectedType.toUpperCase()} ROI ${safetyRois.length + 1}`,
-          coords: currentPoints,
-          type: selectedType
-        });
-        currentPoints = [];
-        drawing = false;
-        drawROIs();
-        
-        // Automatically save after creating ROI
-        saveROIs();
       }
     });
 

@@ -13,10 +13,14 @@ export DOCKER_BUILDKIT=1
 
 MODEL_SIZE ?= m
 IMAGE_SIZE ?= 640
-MODEL_NAME ?= yolov8${MODEL_SIZE}.pt
-INPUT ?= rtsp://admin:admin1234@192.168.1.19:554/h264Preview_01_sub
 
-DEVICE?="CPU"
+PERSON_DET_MODEL ?= yolo11n.pt
+HELMET_DET_MODEL ?= ./models/yolo11s_helmet.pt
+QR_CODE_DET_MODEL ?= ./models/yolo11s_qr_code.pt
+
+INPUT=./videos/video.mp4
+
+DEVICE?=GPU
 
 DOCKER_RUN_PARAMS= \
 	-it --rm -a stdout -a stderr -e DISPLAY=${DISPLAY} -e NO_AT_BRIDGE=1  \
@@ -39,12 +43,14 @@ build:
 	@$(call msg, Building Docker image ${DOCKER_IMAGE_NAME} ...)
 	@docker build --rm . -t ${DOCKER_IMAGE_NAME}
 	
-	
 app: build
 	@$(call msg, Running the Safety Zone Monitoring ...)
 	@docker run ${DOCKER_RUN_PARAMS} bash -c ' \
 		python3 ./app.py  \
-				--detection_model /opt/models/yolo11n/FP16/yolo11n.xml \
+				--debug_qr=False	 \
+				--det_person ${PERSON_DET_MODEL} \
+				--det_helmet ${HELMET_DET_MODEL} \
+				--det_qr_code ${QR_CODE_DET_MODEL} \
 				--input ${INPUT} \
 				--device ${DEVICE} \
 				--config ./configs/config.js \

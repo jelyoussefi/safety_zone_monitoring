@@ -6,23 +6,41 @@ import numpy as np
 import time
 import json
 import threading
+import logging
 from threading import Thread, Condition
 from flask import Flask, redirect, url_for, render_template, make_response, jsonify, request, Response
 from flask_bootstrap import Bootstrap
 from flask_restful import Resource, Api, reqparse
-from utils.yolo_model import YoloV11Model
 from utils.images_capture import VideoCapture
-import openvino.runtime as ov
+from utils.detection_engine import DetectionEngine
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
+import math
+from pyzbar import pyzbar
+import re
+
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 class SafetyZoneMonitor:
-    def __init__(self, detection_model, input, config_file, device="GPU"):
+    def __init__(self, det_person, det_helmet, input, config_file, device="CPU", debug_qr=False, det_qr_code=None):
         with open(config_file) as f:
             self.config = json.load(f)
-        self.model = YoloV11Model(detection_model, device)
+        
+        self.device = device.lower() if device.upper() == 'CPU' else device
+        self.debug_qr = debug_qr
+        
+        try:
+            # Create DetectionEngine instance with model paths
+            self.detection_engine = DetectionEngine(det_person, det_helmet, det_qr_code, device=self.device, debug_qr=debug_qr)
+
+        except Exception as e:
+            print(f"✗ Error loading models: {e}")
+            raise
+        
         self.input = input
         self.cap = VideoCapture(input)
+       
         self.config_file = config_file
         self.app = Flask(__name__)
         self.port = 80
@@ -32,6 +50,14 @@ class SafetyZoneMonitor:
         self.frame = None
         self.high_violation = False
         self.low_violation = False
+
+    def _resize_with_aspect_ratio(self, image, target_width=1280, target_height=720):
+        h, w = image.shape[:2]
+        scale = min(target_width / w, target_height / h)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        resized = cv2.resize(image, (new_w, new_h))
+        return resized
 
     def run(self):
         app = self.app
@@ -47,13 +73,11 @@ class SafetyZoneMonitor:
 
         @app.route('/video_feed')
         def video_feed():
-            # Check if we're in config mode (marker.html) by looking at the referer
             config_mode = request.headers.get('Referer', '').endswith('/config')
             return Response(self.video_stream(config_mode), mimetype='multipart/x-mixed-replace; boundary=frame')
 
         @app.route('/zone_status')
         def zone_status():
-            """Return current zone violation status for audio alerts"""
             return jsonify({
                 'high_violation': getattr(self, 'high_violation', False),
                 'low_violation': getattr(self, 'low_violation', False)
@@ -70,35 +94,17 @@ class SafetyZoneMonitor:
                 return jsonify(success=True)
 
         self.app.run(host='0.0.0.0', port=str(self.port), debug=False, threaded=True)
-
-    def is_in_roi(self, bbox, roi):
-        """Legacy method for center point checking (kept for compatibility)"""
-        x1, y1, x2, y2 = bbox
-        center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
-        try:
-            roi_polygon = Polygon(roi)
-            if not roi_polygon.is_valid:
-                return False
-            from shapely.geometry import Point
-            center_point = Point(center_x, center_y)
-            return roi_polygon.contains(center_point)
-        except Exception:
-            return False
     
     def bbox_intersects_roi(self, bbox, roi):
-        """Check if bounding box intersects with ROI polygon using shapely with pure Python fallback"""
         try:
             x1, y1, x2, y2 = bbox
             
-            # Ensure coordinates are in the correct order (min, max)
             x_min, x_max = min(x1, x2), max(x1, x2)
             y_min, y_max = min(y1, y2), max(y1, y2)
             
-            # Create shapely polygon from ROI coordinates
             if len(roi) < 3:
                 return False
                 
-            # Ensure we have valid coordinate pairs
             roi_coords = []
             for coord in roi:
                 if isinstance(coord, (list, tuple)) and len(coord) == 2:
@@ -108,50 +114,40 @@ class SafetyZoneMonitor:
             
             roi_polygon = Polygon(roi_coords)
             
-            # Check if polygon is valid
             if not roi_polygon.is_valid:
-                # Try to fix invalid polygon
                 roi_polygon = roi_polygon.buffer(0)
                 if not roi_polygon.is_valid:
-                    # Fallback to pure Python method if shapely fails
                     return self._python_bbox_intersects_roi(bbox, roi)
             
-            # Create bounding box as shapely rectangle
             bbox_polygon = box(x_min, y_min, x_max, y_max)
             
-            # Check for intersection
             return roi_polygon.intersects(bbox_polygon)
             
         except Exception as e:
-            # Fallback to pure Python method if shapely fails
             return self._python_bbox_intersects_roi(bbox, roi)
     
     def _python_bbox_intersects_roi(self, bbox, roi):
-        """Pure Python fallback method for bbox-ROI intersection"""
         try:
             x1, y1, x2, y2 = bbox
             x_min, x_max = min(x1, x2), max(x1, x2)
             y_min, y_max = min(y1, y2), max(y1, y2)
             
-            # Check if any corner of the bbox is inside the polygon
             corners = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
             for corner in corners:
                 if self._point_in_polygon(corner, roi):
                     return True
             
-            # Check if any ROI point is inside the bbox
             for point in roi:
                 if isinstance(point, (list, tuple)) and len(point) == 2:
                     px, py = point[0], point[1]
                     if x_min <= px <= x_max and y_min <= py <= y_max:
                         return True
             
-            # Check if any bbox edge intersects with any ROI edge
             bbox_edges = [
-                ((x_min, y_min), (x_max, y_min)),  # top edge
-                ((x_max, y_min), (x_max, y_max)),  # right edge
-                ((x_max, y_max), (x_min, y_max)),  # bottom edge
-                ((x_min, y_max), (x_min, y_min))   # left edge
+                ((x_min, y_min), (x_max, y_min)),
+                ((x_max, y_min), (x_max, y_max)),
+                ((x_max, y_max), (x_min, y_max)),
+                ((x_min, y_max), (x_min, y_min))
             ]
             
             for i in range(len(roi)):
@@ -166,7 +162,6 @@ class SafetyZoneMonitor:
             return False
     
     def _point_in_polygon(self, point, polygon):
-        """Ray casting algorithm to check if point is inside polygon"""
         x, y = point
         n = len(polygon)
         inside = False
@@ -186,7 +181,6 @@ class SafetyZoneMonitor:
         return inside
     
     def _line_segments_intersect(self, seg1, seg2):
-        """Check if two line segments intersect"""
         (x1, y1), (x2, y2) = seg1
         (x3, y3), (x4, y4) = seg2
         
@@ -198,82 +192,119 @@ class SafetyZoneMonitor:
 
     def video_stream(self, config_mode=False):
         self.running = True
-        if self.cap is None:
-            self.cap = VideoCapture(self.input)
-
+        self.cap = VideoCapture(self.input)
+        
         while self.running:
             with self.cv:
-                if self.cap is not None:
-                    self.frame = self.cap.read()
-                    if self.frame is None:
-                        break
+                self.frame = self.cap.read()
+                if self.frame is None:
+                    break
 
-                    # Resize frame to 1280x720
-                    frame = cv2.resize(self.frame, (1280, 720))
-                    frame = frame.copy()
-                    
-                    # Only draw ROIs on the server side if NOT in config mode
-                    if not config_mode:
+                frame = self.frame.copy()
+               
+                if not config_mode:
+                    for roi in self.current_safety_rois:
+                        points = np.array(roi['coords'], np.int32).reshape(-1, 1, 2)
+                        zone_type = roi.get('type', 'high')
+                        if zone_type == 'high':
+                            roi_color = (0, 0, 255)
+                        else:
+                            roi_color = (0, 165, 255)
+                        
+                        cv2.polylines(frame, [points], True, roi_color, 2)
+
+                boxes, scores, class_ids = self.detection_engine.predict(self.detection_engine.person_model, frame, conf=0.5)
+                
+                self.high_violation = False
+                self.low_violation = False
+                
+                for idx, (box, score, class_id) in enumerate(zip(boxes, scores, class_ids)):
+                    label = self.detection_engine.person_labels[class_id]
+                    if label == 'person':
+                        helmet_box, helmet_score = self.detection_engine.detect_helmet_on_person(frame, box, conf=0.5)
+                        has_helmet = helmet_box is not None
+                        
+                        qr_box = None
+                        qr_score = None
+                        qr_data = None
+                        parsed_qr = None
+                        
+                        if helmet_box:
+                            qr_box, qr_score, qr_data = self.detection_engine.detect_qr_code_on_helmet(frame, helmet_box, conf=0.5)
+                            if qr_data:
+                                parsed_qr = self.detection_engine.parse_qr_data(qr_data)
+                            
+                        in_zone = False
+                        zone_color = None
+                        
                         for roi in self.current_safety_rois:
-                            points = np.array(roi['coords'], np.int32).reshape(-1, 1, 2)
-                            # Use different colors based on zone type
-                            zone_type = roi.get('type', 'high')  # Default to 'high'
-                            if zone_type == 'high':
-                                roi_color = (0, 0, 255)  # Red for high security
-                            else:  # 'low'
-                                roi_color = (0, 165, 255)  # Orange for low security
-                            
-                            cv2.polylines(frame, [points], True, roi_color, 2)
-
-                    frame, boxes, scores, class_ids = self.model.predict(frame)
-                    
-                    # Reset violation flags
-                    self.high_violation = False
-                    self.low_violation = False
-                    
-                    for box, score, class_id in zip(boxes, scores, class_ids):
-                        label = self.model.labels[class_id]
-                        if label == 'person':
-                            # First check high security zones
-                            in_high_security = False
-                            for roi in self.current_safety_rois:
-                                if roi.get('type', 'high') == 'high' and self.bbox_intersects_roi(box, roi['coords']):
-                                    in_high_security = True
-                                    self.high_violation = True
-                                    break
-                            
-                            # Only check low security zones if not in high security
-                            in_low_security = False
-                            if not in_high_security:
-                                for roi in self.current_safety_rois:
-                                    if roi.get('type', 'high') == 'low' and self.bbox_intersects_roi(box, roi['coords']):
-                                        in_low_security = True
+                            if self.bbox_intersects_roi(box, roi['coords']):
+                                in_zone = True
+                                zone_type = roi.get('type', 'high')
+                                
+                                if zone_type == 'high':
+                                    zone_color = (0, 0, 255)
+                                    if not has_helmet:
+                                        self.high_violation = True
+                                else:
+                                    zone_color = (0, 165, 255)
+                                    if not has_helmet:
                                         self.low_violation = True
-                                        break
-                            
-                            # Set color based on zone type
-                            if in_high_security:
-                                color = (0, 0, 255)  # Red for high security violation
-                            elif in_low_security:
-                                color = (0, 165, 255)  # Orange for low security violation
+                                break
+                        
+                        if in_zone:
+                            color = zone_color
+                        else:
+                            if has_helmet:
+                                color = (0, 255, 0)
                             else:
-                                color = (0, 255, 0)  # Green if not in any zone
+                                color = (0, 255, 255)
+                        
+                        x1, y1, x2, y2 = [round(coord) for coord in box]
+                        frame = self.detection_engine.plot_one_box(frame, x1, y1, x2, y2, color)
+                        
+                        if helmet_box is not None:
+                            hx1, hy1, hx2, hy2 = [round(coord) for coord in helmet_box]
+                            cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (255, 0, 0), 2)
+                        
+                        if qr_box is not None:
+                            qx1, qy1, qx2, qy2 = [round(x) for x in qr_box]
+                            cv2.rectangle(frame, (qx1, qy1), (qx2, qy2), (255, 0, 255), 3)
+                        
+                        if parsed_qr:
+                            center_x = int((x1 + x2) / 2)
+                            center_y = int((y1 + y2) / 2)
                             
-                            x1, y1, x2, y2 = box.astype(int)
-                            frame = self.model.plot_one_box(frame, x1, y1, x2, y2, score, label, color)
+                            font = cv2.FONT_HERSHEY_SIMPLEX
+                            font_scale = 0.8
+                            thickness = 2
+                            
+                            (text_width, text_height), _ = cv2.getTextSize(parsed_qr, font, font_scale, thickness)
+                            
+                            text_x = center_x - text_width // 2
+                            text_y = center_y + text_height // 2
+                            
+                            padding = 5
+                            cv2.rectangle(frame, 
+                                        (text_x - padding, text_y - text_height - padding),
+                                        (text_x + text_width + padding, text_y + padding),
+                                        (0, 0, 0), -1)
+                            
+                            cv2.putText(frame, parsed_qr, (text_x, text_y), 
+                                       font, font_scale, (255, 255, 255), thickness)
 
-                    ret, buffer = cv2.imencode('.jpg', frame)
-                    frame = buffer.tobytes()
-                    yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                ret, buffer = cv2.imencode('.jpg', frame)
+                frame_bytes = buffer.tobytes()
+                yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-            time.sleep(0.025)  # Simulate cv2.waitKey(25)
+            time.sleep(0.025)
 
         with self.cv:
             self.cap = None
             self.running = False
 
-def main(detection_model, input, config, device, **kwargs):
-    szm = SafetyZoneMonitor(detection_model, input, config, device)
+def main(det_person, det_helmet, input, config, device, debug_qr=False, det_qr_code=None, **kwargs):
+    szm = SafetyZoneMonitor(det_person, det_helmet, input, config, device, debug_qr=debug_qr, det_qr_code=det_qr_code)
     szm.run()
 
 if __name__ == "__main__":
