@@ -11,7 +11,6 @@ from threading import Thread, Condition
 from flask import Flask, redirect, url_for, render_template, make_response, jsonify, request, Response
 from flask_bootstrap import Bootstrap
 from flask_restful import Resource, Api, reqparse
-from utils.images_capture import VideoCapture
 from utils.detection_engine import DetectionEngine
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
@@ -39,7 +38,7 @@ class SafetyZoneMonitor:
             raise
         
         self.input = input
-        self.cap = VideoCapture(input)
+        self.cap = cv2.VideoCapture(input)
        
         self.config_file = config_file
         self.app = Flask(__name__)
@@ -192,13 +191,27 @@ class SafetyZoneMonitor:
 
     def video_stream(self, config_mode=False):
         self.running = True
-        self.cap = VideoCapture(self.input)
+        self.cap = cv2.VideoCapture(self.input)
         
         while self.running:
             with self.cv:
-                self.frame = self.cap.read()
-                if self.frame is None:
-                    break
+                ret, self.frame = self.cap.read()
+                
+                # If end of video is reached, restart from beginning
+                if not ret or self.frame is None:
+                    # Check if it's a video file (not a camera stream)
+                    if isinstance(self.input, str) and not self.input.isdigit():
+                        # Release current capture and restart
+                        self.cap.release()
+                        self.cap = cv2.VideoCapture(self.input)
+                        ret, self.frame = self.cap.read()
+                        
+                        # If still can't read, break
+                        if not ret or self.frame is None:
+                            break
+                    else:
+                        # For camera streams, just break
+                        break
 
                 frame = self.frame.copy()
                
@@ -235,7 +248,7 @@ class SafetyZoneMonitor:
                                 parsed_qr = self.detection_engine.parse_qr_data(qr_data)
                             
                         in_zone = False
-                        zone_color = None
+                        in_high_security_zone = False
                         
                         for roi in self.current_safety_rois:
                             if self.bbox_intersects_roi(box, roi['coords']):
@@ -243,22 +256,31 @@ class SafetyZoneMonitor:
                                 zone_type = roi.get('type', 'high')
                                 
                                 if zone_type == 'high':
-                                    zone_color = (0, 0, 255)
+                                    in_high_security_zone = True
                                     if not has_helmet:
                                         self.high_violation = True
                                 else:
-                                    zone_color = (0, 165, 255)
                                     if not has_helmet:
                                         self.low_violation = True
                                 break
                         
-                        if in_zone:
-                            color = zone_color
+                        # Extract level from parsed QR data
+                        qr_level = None
+                        if parsed_qr:
+                            # Assuming parsed_qr contains level like "H1" or "H2"
+                            # If it's a full string, try to extract H1 or H2
+                            if "H2" in parsed_qr.upper():
+                                qr_level = "H2"
+                            elif "H1" in parsed_qr.upper():
+                                qr_level = "H1"
+                        
+                        # Determine bounding box color based on new logic
+                        # Green if: has_helmet AND (level is H2 OR (level is H1 AND NOT in high security zone))
+                        # Red otherwise
+                        if has_helmet and (qr_level == "H2" or (qr_level == "H1" and not in_high_security_zone)):
+                            color = (0, 255, 0)  # Green
                         else:
-                            if has_helmet:
-                                color = (0, 255, 0)
-                            else:
-                                color = (0, 255, 255)
+                            color = (0, 0, 255)  # Red
                         
                         x1, y1, x2, y2 = [round(coord) for coord in box]
                         frame = self.detection_engine.plot_one_box(frame, x1, y1, x2, y2, color)
@@ -300,6 +322,8 @@ class SafetyZoneMonitor:
             time.sleep(0.025)
 
         with self.cv:
+            if self.cap is not None:
+                self.cap.release()
             self.cap = None
             self.running = False
 
